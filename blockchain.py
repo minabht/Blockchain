@@ -1,14 +1,16 @@
 import json
 import hashlib
+import requests
 from time import time
 from uuid import uuid4
 from flask import Flask, jsonify, request
-
+from urllib.parse import urlparse
 
 class Blockchain():
     def __init__(self):
         self.chain = []
         self.current_trxs = []
+        self.nodes=set()
         self.new_block(proof=100,previous_hash=1)
 
     def new_block(self,proof,previous_hash=None):
@@ -31,6 +33,48 @@ class Blockchain():
         self.current_trxs.append({'sender':sender,'recipient':recipient,'amount':amount})
 
         return self.last_block['index'] + 1
+
+    def register_node(self,address):
+        parsed_url = urlparse(address)
+        self.nodes.add(parsed_url.netloc)
+
+    def valid_chain(self,chain):
+        last_block=chain[0]
+        index=1
+        while index < len(chain):
+            block=chain[index]
+            if block['previous_hash']!=self.hash(last_block):
+                return False
+
+            if not self.valid_proof(last_block['proof'],block['proof']):
+                return False
+
+            index+=1
+            last_block=block
+
+        return True
+
+    def resolve_conflicts(self):
+        neighbours = self.nodes
+        new_chain = None
+
+        max_len=len(self.chain)
+        for node in neighbours:
+            response = requests.get(f'http://{node}/chain')
+
+            if response.status_code == 200:
+                length = response.json()['length']
+                chain = response.json()['chain']
+
+                if length > max_len and self.valid_chain(chain):
+                    max_len = length
+                    new_chain = chain
+
+        if new_chain:
+            self.chain=new_chain
+            return True
+
+        return False
 
     @staticmethod
     def hash(block):
@@ -59,6 +103,7 @@ class Blockchain():
 
         return proof
 
+#-------------------------------------------------------------
 
 app = Flask(__name__)
 node_id = str(uuid4())
@@ -102,5 +147,32 @@ def full_chain():
     }
     return jsonify(response), 200
 
+@app.route('/nodes/register', methods=['POST'])
+def register_nodes():
+    values = request.get_json()
+
+    nodes = values.get('nodes')
+    print(values)
+    if nodes is None:
+        return "Error: Please supply a valid list of nodes", 400
+
+    for node in nodes:
+        blockchain.register_node(node)
+
+    response = {
+        'message': 'New nodes added',
+        'total_nodes': list(blockchain.nodes),
+    }
+    return jsonify(response), 201
+
+@app.route('/nodes/resolve')
+def consensus():
+    replaced = blockchain.resolve_conflicts()
+    response = {
+        'message': 'New Chain replaced',
+        'chain' : blockchain.chain
+    }
+    return jsonify(response), 200
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=6000)
+    app.run(host='0.0.0.0', port=input('Enter a port number: '))
